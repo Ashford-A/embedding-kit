@@ -31,6 +31,8 @@ nav:
       - Losses:
           - Overview: api/losses/index.md
           - VAE Loss: api/losses/vae_loss.md
+          - Likelihood Losses: api/losses/likelihood.md
+          - Alignment Losses: api/losses/alignment.md
       - Constraints:
           - Overview: api/constraints/index.md
       - Metrics:
