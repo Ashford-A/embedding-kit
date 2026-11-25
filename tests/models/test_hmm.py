@@ -108,6 +108,16 @@ class TestSegmentByOrder(unittest.TestCase):
         with self.assertRaises(ValueError):
             segment_by_order(np.zeros(5), np.zeros(4))
 
+    def test_bfloat16_tensor_input(self):
+        values = torch.cat([torch.zeros(20), torch.full((20,), 5.0)]).to(torch.bfloat16)
+        order = torch.arange(40, dtype=torch.float32)
+        states, probs, _ = segment_by_order(values, order, n_states=2, n_iter=50, seed=0)
+        self.assertEqual(states.shape, (40,))
+        self.assertEqual(probs.shape, (40, 2))
+        # the two halves land in different states
+        self.assertEqual(len(set(states[:20])), 1)
+        self.assertNotEqual(states[0], states[-1])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,8 @@
 
 This page shows how to build convolutional VAEs for image tiles and 1-D signals, fuse the posteriors of several encoders, remove a nuisance signal adversarially, and segment samples along an ordering with a hidden Markov model.
 
+**Precision.** The modules on this page are ordinary `nn.Module`s and run in whatever dtype you move them to. `segment_by_order` accepts NumPy arrays or torch tensors of any float dtype, including `bfloat16`, and fits the HMM in float64.
+
 ---
 
 ## Convolutional VAEs

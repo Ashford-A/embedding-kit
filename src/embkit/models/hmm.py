@@ -22,6 +22,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .. import factory
+from ..utilities.arrays import to_numpy
 
 _LOG_2PI = float(np.log(2.0 * np.pi))
 
@@ -158,7 +159,8 @@ def segment_by_order(values: np.ndarray, order: np.ndarray, n_states: int = 3, s
     Segment samples into runs of states along an ordering.
 
     Args:
-        values: ``(samples, dims)`` or ``(samples,)`` — e.g. latent coordinates or a score.
+        values: ``(samples, dims)`` or ``(samples,)`` — e.g. latent coordinates
+            or a score. NumPy array or torch tensor of any float dtype.
         order: One number per sample — e.g. pseudotime or genomic position.
         n_states: Number of states.
         stickiness: Initial self-transition probability.
@@ -169,16 +171,17 @@ def segment_by_order(values: np.ndarray, order: np.ndarray, n_states: int = 3, s
         Tuple ``(states, probabilities, model)`` in the original sample order.
         State numbers are arbitrary labels.
     """
-    values = np.asarray(values.detach().cpu() if torch.is_tensor(values) else values, dtype=float)
+    # NumPy or torch input of any float dtype (bfloat16 included); computed in float64
+    values = to_numpy(values, dtype=np.float64)
     if values.ndim == 1:
         values = values[:, None]
-    order = np.asarray(order, dtype=float)
+    order = to_numpy(order, dtype=np.float64)
     if order.shape != (values.shape[0],):
         raise ValueError("order must have one entry per sample")
     idx = np.argsort(order, kind="stable")
     hmm = GaussianHMM(n_states, values.shape[1], stickiness).fit(values[idx], n_iter=n_iter, seed=seed)
     states = np.empty(len(idx), dtype=int)
     probs = np.empty((len(idx), n_states))
-    states[idx] = hmm.viterbi(values[idx]).numpy()
-    probs[idx] = hmm.posterior(values[idx]).numpy()
+    states[idx] = hmm.viterbi(values[idx]).cpu().numpy()
+    probs[idx] = hmm.posterior(values[idx]).cpu().numpy()
     return states, probs, hmm
