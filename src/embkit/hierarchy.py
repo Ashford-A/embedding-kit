@@ -19,14 +19,14 @@ from typing import Any, Dict, Hashable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import scipy.sparse as sp
-import torch
 from scipy.sparse.csgraph import connected_components, dijkstra, minimum_spanning_tree
 
 from .geometry import ArrayLike, latent_centroid, pairwise_latent_distance, tree_distance_matrix, _rows_per_chunk
+from .utilities.arrays import to_numpy
 
 
 def _np(z) -> np.ndarray:
-    return np.asarray(z.detach().cpu() if torch.is_tensor(z) else z, dtype=float)
+    return to_numpy(z, dtype=float)
 
 
 def cluster_centroids(z: ArrayLike, labels: Sequence[Hashable], geometry: str = "euclidean",
@@ -173,10 +173,9 @@ def tree_agreement(parents_a: Mapping[Hashable, Optional[Hashable]],
         return {frozenset((n, p)) for n, p in par.items() if p is not None}
 
     ea, eb = edges(parents_a), edges(parents_b)
-    da = tree_distance_matrix({str(n): (None if p is None else str(p)) for n, p in parents_a.items()},
-                              order=[str(n) for n in names])[0]
-    db = tree_distance_matrix({str(n): (None if p is None else str(p)) for n, p in parents_b.items()},
-                              order=[str(n) for n in names])[0]
+    # node identities are used as they are: 1 and "1" are different nodes
+    da = tree_distance_matrix(parents_a, order=names)[0]
+    db = tree_distance_matrix(parents_b, order=names)[0]
     iu = np.triu_indices(len(names), 1)
     return {
         "edge_jaccard": len(ea & eb) / max(len(ea | eb), 1),

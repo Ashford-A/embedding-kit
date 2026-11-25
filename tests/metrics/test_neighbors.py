@@ -81,6 +81,13 @@ class TestPurityAndMixing(unittest.TestCase):
         labels = np.repeat(["a", "b"], 5)
         self.assertGreaterEqual(label_purity(z, labels, k=3), 0.0)
 
+    def test_bfloat16_tensor_input(self):
+        import torch
+        z, labels = _two_clusters()
+        zt = torch.as_tensor(z, dtype=torch.bfloat16)
+        self.assertEqual(label_purity(zt, labels, k=5), 1.0)
+        self.assertEqual(len(label_transfer_knn(zt, labels, zt[:3], k=3)[0]), 3)
+
     def test_errors(self):
         z, labels = _two_clusters()
         with self.assertRaises(ValueError):

@@ -2,6 +2,8 @@
 
 This page covers training with a hyperbolic or product latent space, measuring distances in it, scoring an embedding against a known label tree, recovering hierarchy from an embedding, and the neighbourhood metrics (label transfer, label purity, batch mixing) that work in any of these geometries.
 
+**Precision.** The distance, radius, hierarchy and neighbour functions accept NumPy arrays or torch tensors of any float dtype, including `bfloat16`. They compute in float64 and return NumPy arrays.
+
 ---
 
 ## When to use a hyperbolic latent space

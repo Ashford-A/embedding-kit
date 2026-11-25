@@ -25,15 +25,15 @@ from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import torch
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 from sklearn.neighbors import NearestNeighbors
 
 from ..geometry import pairwise_latent_distance, _rows_per_chunk
+from ..utilities.arrays import to_numpy
 
 
 def _np(z) -> np.ndarray:
-    return np.asarray(z.detach().cpu() if torch.is_tensor(z) else z, dtype=float)
+    return to_numpy(z, dtype=float)
 
 
 def _knn(query: np.ndarray, ref: np.ndarray, k: int, geometry: str, hyperbolic_dim: Optional[int],
@@ -90,8 +90,8 @@ def label_transfer_knn(Z_source: np.ndarray, labels_source: np.ndarray, Z_target
     Raises:
         ValueError: If ``Z_source`` is empty.
     """
-    Z_source = np.asarray(Z_source, dtype=np.float32)
-    Z_target = np.asarray(Z_target, dtype=np.float32)
+    Z_source = to_numpy(Z_source, dtype=np.float32)
+    Z_target = to_numpy(Z_target, dtype=np.float32)
     labels_source = np.asarray(labels_source)
     if Z_source.shape[0] == 0:
         raise ValueError("Z_source is empty")

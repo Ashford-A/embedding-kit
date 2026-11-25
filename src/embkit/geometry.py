@@ -44,6 +44,8 @@ from typing import Dict, Mapping, Optional, Sequence, Tuple, Union
 import numpy as np
 import torch
 
+from .utilities.arrays import to_numpy
+
 GEOMETRIES = ("euclidean", "hyperbolic", "product")
 _EPS = 1e-12
 _LOG_2PI = math.log(2.0 * math.pi)
@@ -117,16 +119,51 @@ def logmap0(x: torch.Tensor) -> torch.Tensor:
     return torch.asinh(n) * xb / n.clamp_min(_EPS)
 
 
+def _log_sinh(r: torch.Tensor) -> torch.Tensor:
+    """``log(sinh(r))`` for ``r >= 0``, without overflow; ``-inf`` at 0."""
+    return r + torch.log(-torch.expm1(-2.0 * r)) - math.log(2.0)
+
+
+def _tangent_half_distance(u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """
+    Half the unit-curvature geodesic distance between tangent coordinates ``u`` and ``v`` (broadcasts).
+
+    Uses the hyperbolic law of cosines in the cancellation-free form
+    ``sinh^2(d/2) = sinh^2((r1 - r2)/2) + sinh(r1) sinh(r2) sin^2(theta/2)``,
+    where ``r1, r2`` are the radii and ``theta`` the angle between the
+    directions. Every term is non-negative, so nearby points far from the
+    origin keep their distance (subtracting hyperboloid coordinates of size
+    ``cosh(r)`` would cancel it). The sum is formed in log space, so large radii
+    do not overflow, and identical points give exactly 0.
+    """
+    ru, rv = u.norm(dim=-1), v.norm(dim=-1)
+    sin2_half = ((_directions(u, ru) - _directions(v, rv)) ** 2).sum(-1) / 4.0   # sin^2(theta / 2), from a difference
+    return _half_distance(ru, rv, sin2_half)
+
+
+def _directions(u: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
+    """Unit directions of ``u`` given its norms ``r``; the zero vector stays zero."""
+    return u / r.clamp_min(1e-300).unsqueeze(-1)
+
+
+def _half_distance(ru: torch.Tensor, rv: torch.Tensor, sin2_half: torch.Tensor) -> torch.Tensor:
+    """Half distance from radii and ``sin^2(theta / 2)`` (see :func:`_tangent_half_distance`); broadcasts."""
+    log_q = torch.logaddexp(2.0 * _log_sinh((ru - rv).abs() / 2.0),
+                            _log_sinh(ru) + _log_sinh(rv) + torch.log(sin2_half))
+    h = 0.5 * log_q                                                # log(sinh(d / 2))
+    # asinh(exp(h)), switching to its asymptote log(2) + h where exp(h) would overflow
+    return torch.where(h > 20.0, h + math.log(2.0), torch.asinh(torch.exp(h.clamp(max=20.0))))
+
+
 def lorentz_distance(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     """
     Geodesic distance between points on the unit hyperboloid (broadcasts).
 
-    Uses ``cosh(d) = 1 + <x - y, x - y>_L / 2``, which loses far less precision
-    for nearby points than ``acosh(-<x, y>_L)``.
+    Computed from their tangent coordinates at the origin with a
+    cancellation-free formula, so it stays accurate for nearby points at large
+    radii, where ``x - y`` in hyperboloid coordinates loses all precision.
     """
-    diff = x - y
-    s = (-diff[..., 0] ** 2 + (diff[..., 1:] ** 2).sum(-1)).clamp_min(1e-24)
-    return 2.0 * torch.asinh(0.5 * torch.sqrt(s))
+    return 2.0 * _tangent_half_distance(logmap0(x), logmap0(y))
 
 
 def boost(center: torch.Tensor, x: torch.Tensor, inverse: bool = False) -> torch.Tensor:
@@ -265,42 +302,52 @@ def wrapped_normal_kl(mu_q: torch.Tensor, logvar_q: torch.Tensor,
 # ---------------------------------------------------------------------------
 
 def _as_tensor(z: ArrayLike) -> torch.Tensor:
-    return torch.as_tensor(np.asarray(z.detach().cpu() if torch.is_tensor(z) else z), dtype=torch.float64)
+    return torch.as_tensor(to_numpy(z), dtype=torch.float64)
 
 
 def _sqdist_rows(a: torch.Tensor, b: torch.Tensor, d_e: int, curvature: float) -> torch.Tensor:
-    """Row-wise squared geodesic distance for float64 tensors with ``d_e`` Euclidean columns."""
+    """
+    Squared geodesic distance for float64 tensors with ``d_e`` Euclidean columns (broadcasts).
+
+    Both blocks are computed from explicit differences, never from expanded
+    squared norms, so there is no cancellation for nearby points.
+    """
     out = ((a[..., :d_e] - b[..., :d_e]) ** 2).sum(-1)
     if a.shape[-1] > d_e:
         sc = math.sqrt(curvature)
-        d = lorentz_distance(expmap0(sc * a[..., d_e:]), expmap0(sc * b[..., d_e:])) / sc
+        d = 2.0 * _tangent_half_distance(sc * a[..., d_e:], sc * b[..., d_e:]) / sc
         out = out + d ** 2
     return out
 
 
-def _cdist_sq(a: torch.Tensor, b: torch.Tensor, d_e: int, curvature: float) -> torch.Tensor:
-    """
-    All-pairs ``(n, m)`` squared geodesic distance from inner products.
+def _exact_cdist(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """All-pairs Euclidean distance ``(n, m)`` from coordinate differences (no ``|a|^2 + |b|^2 - 2ab``)."""
+    return torch.cdist(a, b, compute_mode="donot_use_mm_for_euclid_dist")
 
-    Memory is ``O(n * m)`` rather than ``O(n * m * latent_dim)``.
+
+def _pairwise_sqdist(a: torch.Tensor, b: torch.Tensor, d_e: int, curvature: float) -> torch.Tensor:
     """
-    out = torch.zeros(a.shape[0], b.shape[0], dtype=a.dtype)
-    if d_e:
-        ea, eb = a[:, :d_e], b[:, :d_e]
-        out = out + ((ea ** 2).sum(-1, keepdim=True) + (eb ** 2).sum(-1).unsqueeze(0)
-                     - 2.0 * ea @ eb.transpose(0, 1)).clamp_min(0.0)
-    if a.shape[1] > d_e:
+    All-pairs squared geodesic distance ``(n, m)`` between float64 ``(n, d)`` and ``(m, d)``.
+
+    Same formula as :func:`_sqdist_rows`, arranged so the per-pair work is a
+    handful of ``(n, m)`` operations: radii and directions are computed once per
+    row, and the only all-pairs differences are taken by ``torch.cdist`` in its
+    exact (difference-based) mode.
+    """
+    out = _exact_cdist(a[:, :d_e], b[:, :d_e]) ** 2 if d_e else a.new_zeros(len(a), len(b))
+    if a.shape[-1] > d_e:
         sc = math.sqrt(curvature)
-        x, y = expmap0(sc * a[:, d_e:]), expmap0(sc * b[:, d_e:])
-        inner = x[:, 1:] @ y[:, 1:].transpose(0, 1) - x[:, :1] @ y[:, :1].transpose(0, 1)  # Lorentz inner product
-        s = (-2.0 - 2.0 * inner).clamp_min(1e-24)                                           # <x - y, x - y>_L
-        out = out + (2.0 * torch.asinh(0.5 * torch.sqrt(s)) / sc) ** 2
+        u, v = sc * a[:, d_e:], sc * b[:, d_e:]
+        ru, rv = u.norm(dim=-1), v.norm(dim=-1)
+        sin2_half = _exact_cdist(_directions(u, ru), _directions(v, rv)) ** 2 / 4.0
+        d = 2.0 * _half_distance(ru[:, None], rv[None, :], sin2_half) / sc
+        out = out + d ** 2
     return out
 
 
 def _rows_per_chunk(n_columns: int, requested: int = 1024, budget: float = 5e7) -> int:
-    """How many query rows to process at once so a ``rows x n_columns`` block stays near 400 MB."""
-    return int(max(8, min(int(requested), budget // max(int(n_columns), 1))))
+    """How many query rows to process at once so a ``rows x n_columns`` float64 block stays near 400 MB."""
+    return int(max(1, min(int(requested), budget // max(int(n_columns), 1))))
 
 
 def latent_distance(a: ArrayLike, b: ArrayLike, geometry: str = "euclidean",
@@ -320,7 +367,7 @@ def latent_distance(a: ArrayLike, b: ArrayLike, geometry: str = "euclidean",
     """
     ta, tb = _as_tensor(a), _as_tensor(b)
     d_e, _ = split_latent_dims(ta.shape[-1], geometry, hyperbolic_dim)
-    return torch.sqrt(_sqdist_rows(ta, tb, d_e, _check_curvature(curvature)) + _EPS).numpy()
+    return torch.sqrt(_sqdist_rows(ta, tb, d_e, _check_curvature(curvature))).numpy()
 
 
 def pairwise_latent_distance(a: ArrayLike, b: Optional[ArrayLike] = None, geometry: str = "euclidean",
@@ -329,21 +376,26 @@ def pairwise_latent_distance(a: ArrayLike, b: Optional[ArrayLike] = None, geomet
     """
     All-pairs ``(n, m)`` geodesic distance; ``b=None`` compares ``a`` with itself.
 
-    Rows of ``a`` are processed in chunks of ``chunk`` so memory stays bounded.
+    Distances are computed from explicit differences, so nearby points keep
+    their distance at any radius and self-distances are exactly 0. Rows of
+    ``a`` are processed at most ``chunk`` at a time, and fewer when needed to
+    keep each ``rows x m`` working block near 80 MB.
     """
     c = _check_curvature(curvature)
     ta = _as_tensor(a)
     same = b is None
     tb = ta if same else _as_tensor(b)
     d_e, _ = split_latent_dims(ta.shape[-1], geometry, hyperbolic_dim)
+    step = _rows_per_chunk(len(tb), chunk, budget=1e7)
     blocks = []
-    for i in range(0, len(ta), int(chunk)):
-        d2 = _cdist_sq(ta[i:i + chunk], tb, d_e, c)
+    for i in range(0, len(ta), step):
+        d = torch.sqrt(_pairwise_sqdist(ta[i:i + step], tb, d_e, c))
         if same:
-            # identical points have zero distance; inner-product cancellation can leave small errors
-            rows = torch.arange(d2.shape[0])
-            d2[rows, rows + i] = 0.0
-        blocks.append(torch.sqrt(d2 + _EPS))
+            rows = torch.arange(d.shape[0])
+            d[rows, rows + i] = 0.0
+        blocks.append(d)
+    if not blocks:
+        return np.zeros((0, len(tb)))
     return torch.cat(blocks).numpy()
 
 
@@ -354,7 +406,7 @@ def latent_radius(z: ArrayLike) -> np.ndarray:
     Valid in every geometry because the hyperbolic block is stored in tangent
     coordinates at the origin.
     """
-    return np.linalg.norm(np.asarray(z.detach().cpu() if torch.is_tensor(z) else z), axis=-1)
+    return np.linalg.norm(to_numpy(z, dtype=float), axis=-1)
 
 
 def latent_centroid(z: ArrayLike, geometry: str = "euclidean", hyperbolic_dim: Optional[int] = None,
@@ -478,7 +530,7 @@ def hierarchy_metrics(z: ArrayLike, labels: Sequence[int], dist: ArrayLike, dept
     """
     from scipy.stats import spearmanr
 
-    z_np = np.asarray(z.detach().cpu() if torch.is_tensor(z) else z)
+    z_np = to_numpy(z, dtype=float)
     labels = np.asarray(labels)
     dist = np.asarray(dist, dtype=float)
     keep = np.flatnonzero((labels >= 0) & (labels < dist.shape[0]))

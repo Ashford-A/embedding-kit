@@ -100,6 +100,13 @@ class TestTreeAgreement(unittest.TestCase):
         out = H.tree_agreement({"r": None, "a": "r"}, {"r": None, "a": "r"})
         self.assertTrue(np.isnan(out["path_spearman"]))
 
+    def test_distinct_nodes_with_equal_strings(self):
+        # regression: converting nodes to strings merged 1 and "1"
+        p = {1: None, "1": 1, "leaf": "1"}
+        out = H.tree_agreement(p, dict(p))
+        self.assertEqual(out["edge_jaccard"], 1.0)
+        self.assertEqual(out["parent_accuracy"], 1.0)
+
     def test_node_mismatch(self):
         with self.assertRaises(ValueError):
             H.tree_agreement({"r": None}, {"q": None})

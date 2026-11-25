@@ -141,9 +141,37 @@ class TestArrayHelpers(unittest.TestCase):
             self.assertTrue(np.allclose(np.diag(D), G.latent_distance(self.a, self.b, geo), atol=1e-5))
 
     def test_pairwise_self_symmetric_zero_diagonal(self):
-        D = G.pairwise_latent_distance(torch.as_tensor(self.a), geometry="hyperbolic", chunk=5)
-        self.assertTrue(np.allclose(D, D.T, atol=1e-6))
-        self.assertTrue(np.allclose(np.diag(D), 0.0, atol=1e-5))
+        for geo in ("euclidean", "hyperbolic", "product"):
+            D = G.pairwise_latent_distance(torch.as_tensor(self.a), geometry=geo, chunk=5)
+            self.assertTrue(np.allclose(D, D.T, atol=1e-9))
+            self.assertTrue(np.array_equal(np.diag(D), np.zeros(12)), geo)   # exactly zero
+
+    def test_nearby_points_at_large_radius(self):
+        # regression: subtracting hyperboloid coordinates (~cosh(18)) cancelled this distance to ~1e-6
+        a, b = np.array([[18.0]]), np.array([[19.0]])
+        self.assertAlmostEqual(float(G.latent_distance(a, b, "hyperbolic")[0]), 1.0, places=9)
+        self.assertAlmostEqual(float(G.pairwise_latent_distance(a, b, "hyperbolic")[0, 0]), 1.0, places=9)
+        x = G.expmap0(torch.tensor([[18.0]], dtype=torch.float64))
+        y = G.expmap0(torch.tensor([[19.0]], dtype=torch.float64))
+        self.assertAlmostEqual(float(G.lorentz_distance(x, y)), 1.0, places=6)
+        # a small angular offset at radius 15: d = 2 asinh(sinh(15) sin(theta / 2)) for equal radii
+        theta = 1e-6
+        u = np.array([[15.0, 0.0]])
+        v = 15.0 * np.array([[np.cos(theta), np.sin(theta)]])
+        expected = 2 * np.arcsinh(np.sinh(15.0) * np.sin(theta / 2))
+        self.assertAlmostEqual(float(G.latent_distance(u, v, "hyperbolic")[0]) / expected, 1.0, places=6)
+        self.assertAlmostEqual(float(G.pairwise_latent_distance(u, v, "hyperbolic")[0, 0]) / expected, 1.0, places=6)
+
+    def test_very_large_radii_do_not_overflow(self):
+        d = G.latent_distance(np.array([[500.0, 0.0]]), np.array([[0.0, 500.0]]), "hyperbolic")
+        self.assertAlmostEqual(float(d[0]), 1000.0 + 2 * np.log(np.sin(np.pi / 4)), places=6)
+
+    def test_bfloat16_tensor_input(self):
+        z = torch.as_tensor(self.a, dtype=torch.bfloat16)
+        d = G.latent_distance(z, z.flip(0), "hyperbolic")
+        self.assertEqual(d.dtype, np.float64)
+        self.assertTrue(np.isfinite(G.pairwise_latent_distance(z, geometry="product")).all())
+        self.assertEqual(G.latent_radius(z).shape, (12,))
 
     def test_centroid(self):
         self.assertTrue(np.allclose(G.latent_centroid(self.a), self.a.mean(0)))
@@ -161,7 +189,7 @@ class TestArrayHelpers(unittest.TestCase):
 
     def test_rows_per_chunk(self):
         self.assertEqual(G._rows_per_chunk(10, 1024), 1024)
-        self.assertEqual(G._rows_per_chunk(10 ** 9, 1024), 8)
+        self.assertEqual(G._rows_per_chunk(10 ** 9, 1024), 1)
 
 
 class TestTrees(unittest.TestCase):
