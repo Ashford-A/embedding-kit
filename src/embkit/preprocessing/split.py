@@ -24,7 +24,12 @@ def split_by_label(labels: Sequence, train_fraction: float = 0.8, val_fraction: 
 
     Within each label the samples are shuffled, the first ``train_fraction``
     go to training, the next ``val_fraction`` to validation and the rest to
-    test. Samples left over by a cap go to the test set.
+    test. Samples left over by a cap go to the test set. The three index arrays
+    never overlap and together cover every sample.
+
+    Fractions are rounded down per label, so a label with very few samples can
+    end up with no training or validation samples; check ``np.unique`` of the
+    training labels if you have rare classes.
 
     Args:
         labels: One label per sample.
@@ -41,9 +46,23 @@ def split_by_label(labels: Sequence, train_fraction: float = 0.8, val_fraction: 
         ``{"train": idx, "val": idx, "test": idx}`` with integer position arrays.
 
     Raises:
-        ValueError: On missing labels, invalid fractions, or conflicting caps.
+        ValueError: On missing labels, invalid fractions, negative or
+            non-integer caps, or conflicting caps.
+
+    Example:
+        >>> labels = ["B"] * 10 + ["T"] * 20
+        >>> split = split_by_label(labels, train_fraction=0.6, val_fraction=0.2, seed=0)
+        >>> {name: len(idx) for name, idx in split.items()}
+        {'train': 18, 'val': 6, 'test': 6}
+        >>> capped = split_by_label(labels, train_fraction=0.6, val_fraction=0.2, train_cap=4)
+        >>> len(capped["train"]), len(capped["test"])   # 4 per label; the overflow goes to test
+        (8, 16)
     """
     labels = np.asarray(labels)
+    for name, cap in (("train_cap", train_cap), ("val_cap", val_cap), ("max_per_label", max_per_label)):
+        # a negative cap would slice from the end of the shuffled indices and make the splits overlap
+        if cap is not None and (isinstance(cap, bool) or not isinstance(cap, (int, np.integer)) or cap < 0):
+            raise ValueError(f"{name} must be a non-negative integer or None, got {cap!r}")
     if max_per_label is not None and (train_cap is not None or val_cap is not None):
         raise ValueError("choose a pool cap (max_per_label) or separate train/validation caps, not both")
     if pd.isna(labels).any():

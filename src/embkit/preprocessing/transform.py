@@ -15,7 +15,9 @@ rest of embkit without requiring AnnData or Scanpy:
   samples and applied to any others.
 
 All functions validate that inputs are finite, non-negative raw counts and
-return the same container type they were given.
+return the same container type they were given (a DataFrame keeps its index
+and columns). NumPy arrays and torch tensors of any dtype, including
+``bfloat16``, are accepted; the arithmetic is done in float64.
 
 Ported from UniVII (``univii.preprocessing``).
 """
@@ -29,11 +31,13 @@ from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import TfidfTransformer
 from sklearn.preprocessing import StandardScaler, normalize
 
+from ..utilities.arrays import to_numpy
+
 MatrixLike = Union[pd.DataFrame, np.ndarray]
 
 
 def _check_counts(x: np.ndarray) -> np.ndarray:
-    x = np.asarray(x, dtype=np.float64)
+    x = to_numpy(x, dtype=np.float64)
     if x.ndim != 2:
         raise ValueError(f"expected a 2-D (samples, features) matrix, got shape {x.shape}")
     if not np.isfinite(x).all() or (x < 0).any():
@@ -51,14 +55,32 @@ def library_size_norm(df: MatrixLike, target_sum: float = 1e4, log1p: bool = Tru
     """
     Scale each sample to ``target_sum`` total counts, then optionally ``log1p``.
 
+    Use this for RNA counts (single-cell or bulk). Samples sequenced to
+    different depths have different total counts for reasons unrelated to
+    biology; rescaling every sample to the same total removes that, and the
+    ``log1p`` compresses the long right tail of highly expressed genes. Each
+    sample is handled on its own, so there is nothing to fit and it is safe to
+    apply before or after splitting. A sample with zero total count stays zero.
+
     Args:
-        df: Raw counts, ``(samples, features)``.
+        df: Raw counts, ``(samples, features)``: rows are samples (cells),
+            columns are features (genes).
         target_sum: Total count each sample is scaled to (1e4 is the common
             "counts per 10k" convention).
         log1p: Apply ``log(1 + x)`` after scaling.
 
     Returns:
         Normalized matrix of the same type and shape as ``df``.
+
+    Raises:
+        ValueError: If ``df`` is not 2-D or contains negative or non-finite values.
+
+    Example:
+        >>> counts = pd.DataFrame([[1, 3], [10, 30]], index=["cell1", "cell2"], columns=["CD3E", "MS4A1"])
+        >>> library_size_norm(counts, target_sum=100, log1p=False)   # both cells now total 100
+               CD3E  MS4A1
+        cell1  25.0   75.0
+        cell2  25.0   75.0
     """
     x = _check_counts(df)
     totals = x.sum(axis=1, keepdims=True)
@@ -72,14 +94,29 @@ def clr_norm(df: MatrixLike) -> MatrixLike:
     """
     Per-sample centred log-ratio of ``log1p`` counts (the usual ADT transform).
 
-    Each sample's ``log1p`` values are centred on their own mean, so a global
-    shift in staining intensity for one cell does not change its profile.
+    Use this for antibody-derived tag (ADT) counts from CITE-seq and similar
+    surface-protein assays. Cells differ in how strongly they take up the
+    antibody panel as a whole; centring each cell's ``log1p`` values on that
+    cell's own mean removes the overall level and keeps the relative
+    abundances. Each sample is handled on its own (nothing to fit). Each row of
+    the output sums to zero.
 
     Args:
-        df: Raw (not already CLR-transformed) abundances, ``(samples, features)``.
+        df: Raw (not already CLR-transformed) abundances, ``(samples, features)``:
+            rows are cells, columns are antibodies.
 
     Returns:
         CLR-transformed matrix of the same type and shape as ``df``.
+
+    Raises:
+        ValueError: If ``df`` is not 2-D or contains negative or non-finite values.
+
+    Example:
+        >>> adt = pd.DataFrame([[0, 0, 63], [3, 3, 255]], index=["cell1", "cell2"], columns=["CD4", "CD8", "CD19"])
+        >>> clr_norm(adt).round(3)
+                 CD4    CD8   CD19
+        cell1 -1.386 -1.386  2.773
+        cell2 -1.386 -1.386  2.773
     """
     values = np.log1p(_check_counts(df))
     return _wrap(values - values.mean(axis=1, keepdims=True), df)
@@ -88,6 +125,18 @@ def clr_norm(df: MatrixLike) -> MatrixLike:
 class TfidfLSI(BaseEstimator, TransformerMixin):
     """
     TF-IDF + truncated SVD (LSI) for peak/bin count matrices, fitted on training samples.
+
+    Use this for chromatin-accessibility (scATAC-seq) counts, where the raw
+    matrix is very wide (tens of thousands of peaks or genome bins) and very
+    sparse. TF-IDF up-weights peaks that are open in few cells, which carry
+    more information about cell identity than peaks open everywhere; the
+    truncated SVD then compresses the weighted matrix to a few dozen dense
+    components that make good model inputs.
+
+    Everything learned here (the peak filter, IDF weights, SVD basis and
+    scaler) comes from the samples passed to :meth:`fit`. Fit on training
+    samples only and use :meth:`transform` for validation, test and query
+    samples, so no information leaks from them.
 
     Three TF-IDF conventions are available:
 
@@ -106,7 +155,22 @@ class TfidfLSI(BaseEstimator, TransformerMixin):
         max_fraction: Keep features detected in at most this fraction of training samples.
         random_state: Seed for the randomized SVD.
 
-    After :meth:`fit`, ``features_`` holds the boolean mask of retained input columns.
+    After :meth:`fit`, ``features_`` holds the boolean mask of retained input
+    columns. When fitted on a DataFrame, ``feature_names_in_`` holds the
+    training column names, and :meth:`transform` matches DataFrame columns to
+    them by name: reordered columns are put back in training order, and
+    missing or unexpected columns raise an error.
+
+    Example:
+        >>> rng = np.random.default_rng(0)
+        >>> peaks = pd.DataFrame(rng.poisson(0.3, size=(60, 200)),
+        ...                      columns=[f"chr1:{i * 500}-{i * 500 + 500}" for i in range(200)])
+        >>> lsi = TfidfLSI(n_components=11, method="signac", drop_first=True)
+        >>> train = lsi.fit_transform(peaks.iloc[:50])
+        >>> train.shape, list(train.columns[:3])
+        ((50, 10), ['LSI_1', 'LSI_2', 'LSI_3'])
+        >>> lsi.transform(peaks.iloc[50:]).shape   # new samples, same peaks
+        (10, 10)
     """
 
     def __init__(self, n_components: int = 100, method: str = "sklearn", drop_first: bool = False,
@@ -128,12 +192,29 @@ class TfidfLSI(BaseEstimator, TransformerMixin):
             tf.data = np.log1p(tf.data * 1e4)
         return normalize(tf, norm="l2", axis=1)
 
+    def _align_columns(self, X: pd.DataFrame) -> pd.DataFrame:
+        """Reorder ``X``'s columns to the training order; refuse missing or extra columns."""
+        names = pd.Index(self.feature_names_in_)
+        if X.columns.equals(names):
+            return X
+        if X.columns.has_duplicates:
+            raise ValueError("X has duplicate column names; cannot match them to the training features")
+        missing, extra = names.difference(X.columns), X.columns.difference(names)
+        if len(missing) or len(extra):
+            raise ValueError(f"X columns do not match the training features: {len(missing)} missing "
+                             f"(e.g. {list(missing[:3])}), {len(extra)} unexpected (e.g. {list(extra[:3])})")
+        return X.loc[:, names]
+
     def fit(self, X: MatrixLike, y=None) -> "TfidfLSI":
         """Fit feature filter, TF-IDF weights, SVD basis and (optionally) the scaler."""
         if self.method not in {"sklearn", "signac", "tea"}:
             raise ValueError(f"method must be 'sklearn', 'signac' or 'tea', got {self.method!r}")
         if not 0 <= self.min_fraction < self.max_fraction <= 1:
             raise ValueError("require 0 <= min_fraction < max_fraction <= 1")
+        if isinstance(X, pd.DataFrame):
+            self.feature_names_in_ = np.asarray(X.columns, dtype=object)
+        elif hasattr(self, "feature_names_in_"):
+            del self.feature_names_in_
         x = sp.csr_matrix(_check_counts(X))
         df = np.asarray((x > 0).sum(axis=0)).ravel()
         frequency = df / x.shape[0]
@@ -159,12 +240,24 @@ class TfidfLSI(BaseEstimator, TransformerMixin):
         """
         Project samples onto the fitted LSI basis.
 
+        Args:
+            X: Raw counts for the same features as the training data. A
+                DataFrame is matched to the training columns by name (when the
+                model was fitted on a DataFrame); an array must have the
+                training columns in the training order.
+
         Returns:
             ``(samples, n_components - drop_first)``; a DataFrame with
             ``LSI_<i>`` columns when ``X`` is a DataFrame, otherwise an array.
+
+        Raises:
+            RuntimeError: If called before :meth:`fit`.
+            ValueError: If the features do not match the training features.
         """
         if not hasattr(self, "svd_"):
             raise RuntimeError("call fit on training samples first")
+        if isinstance(X, pd.DataFrame) and hasattr(self, "feature_names_in_"):
+            X = self._align_columns(X)
         x = sp.csr_matrix(_check_counts(X))
         if x.shape[1] != self.features_.shape[0]:
             raise ValueError(f"expected {self.features_.shape[0]} features, got {x.shape[1]}")

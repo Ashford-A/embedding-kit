@@ -4,6 +4,7 @@ import unittest
 
 import numpy as np
 import pandas as pd
+import torch
 
 from embkit.preprocessing import (
     library_size_norm, clr_norm, TfidfLSI, split_by_label, MacenkoNormalizer, rgb_to_od, od_to_rgb,
@@ -162,6 +163,76 @@ class TestMacenko(unittest.TestCase):
             MacenkoNormalizer().fit(np.zeros((2, 4, 8, 8)))
         with self.assertRaises(ValueError):
             MacenkoNormalizer().fit(np.full((2, 3, 8, 8), 2.0))
+
+
+
+class TestReviewRegressions(unittest.TestCase):
+    """Cases raised in review: negative caps, non-finite pixels, DataFrame column order, bf16."""
+
+    def test_split_rejects_negative_and_non_integer_caps(self):
+        labels = ["a"] * 10
+        for kwargs in ({"train_cap": -1}, {"val_cap": -1}, {"max_per_label": -1},
+                       {"train_cap": 2.5}, {"val_cap": True}, {"max_per_label": "3"}):
+            with self.subTest(**kwargs), self.assertRaises(ValueError):
+                split_by_label(labels, **kwargs)
+        # numpy integers and zero are fine, and the splits stay disjoint
+        split = split_by_label(labels, train_cap=np.int64(0), val_cap=0)
+        self.assertEqual(len(split["train"]) + len(split["val"]), 0)
+        self.assertEqual(sorted(split["test"].tolist()), list(range(10)))
+
+    def test_macenko_rejects_non_finite(self):
+        tiles = TestMacenko()._slide(0, (1.0, 1.0, 1.0))
+        for bad in (np.nan, np.inf):
+            broken = tiles.copy()
+            broken[0, 1, 3, 3] = bad
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                MacenkoNormalizer().fit(broken)
+        norm = MacenkoNormalizer().fit(tiles)
+        broken = tiles.copy()
+        broken[0, :, 0, 0] = np.nan
+        with self.assertRaises(ValueError):
+            norm.transform(broken)
+
+    def test_macenko_accepts_bf16_tensors(self):
+        tiles = TestMacenko()._slide(0, (1.0, 1.0, 1.0))
+        norm = MacenkoNormalizer().fit(torch.tensor(tiles).to(torch.bfloat16))
+        out = norm.transform(torch.tensor(tiles[0]).to(torch.bfloat16))
+        self.assertEqual(out.shape, tiles[0].shape)
+        self.assertEqual(out.dtype, np.float32)
+
+    def test_tfidf_aligns_reordered_columns(self):
+        df = _counts(n=40, m=25)
+        lsi = TfidfLSI(n_components=5, random_state=0).fit(df)
+        np.testing.assert_array_equal(lsi.feature_names_in_, df.columns.to_numpy())
+        reference = lsi.transform(df)
+        shuffled = df[df.columns[::-1]]
+        pd.testing.assert_frame_equal(lsi.transform(shuffled), reference)
+
+    def test_tfidf_rejects_mismatched_columns(self):
+        df = _counts(n=40, m=25)
+        lsi = TfidfLSI(n_components=5, random_state=0).fit(df)
+        renamed = df.rename(columns={"f0": "other"})
+        with self.assertRaisesRegex(ValueError, "1 missing"):
+            lsi.transform(renamed)
+        with self.assertRaises(ValueError):
+            lsi.transform(df.drop(columns="f3"))
+        duplicated = df.copy()
+        duplicated.columns = ["f1"] + list(df.columns[1:])
+        with self.assertRaises(ValueError):
+            lsi.transform(duplicated)
+        # arrays keep the positional contract
+        self.assertEqual(lsi.transform(df.to_numpy()).shape, (40, 5))
+
+    def test_tfidf_refit_on_array_forgets_names(self):
+        df = _counts(n=40, m=25)
+        lsi = TfidfLSI(n_components=5, random_state=0).fit(df).fit(df.to_numpy())
+        self.assertFalse(hasattr(lsi, "feature_names_in_"))
+        self.assertEqual(lsi.transform(df[df.columns[::-1]]).shape, (40, 5))
+
+    def test_transforms_accept_bf16_tensors(self):
+        x = torch.tensor(_counts(n=10, m=6).to_numpy()).to(torch.bfloat16)
+        self.assertEqual(library_size_norm(x).shape, (10, 6))
+        self.assertTrue(np.allclose(clr_norm(x).sum(axis=1), 0.0))
 
 
 if __name__ == "__main__":

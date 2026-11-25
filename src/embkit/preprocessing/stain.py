@@ -13,13 +13,21 @@ intensity.
 
 Fit and transform one slide (one staining batch) at a time: the stain colours
 are estimated from the pixels passed in, so they should share a stain.
-Reference: Macenko et al., IEEE ISBI 2009.
+
+Reference:
+    M. Macenko, M. Niethammer, J. S. Marron, D. Borland, J. T. Woosley, X. Guan,
+    C. Schmitt and N. E. Thomas. "A method for normalizing histology slides for
+    quantitative analysis." *2009 IEEE International Symposium on Biomedical
+    Imaging: From Nano to Macro*, pp. 1107-1110.
+    https://doi.org/10.1109/ISBI.2009.5193250
 
 Ported from UniVII (``univii.histology``).
 """
 from typing import Optional, Tuple
 
 import numpy as np
+
+from ..utilities.arrays import to_numpy
 
 _FLOOR = 1.0 / 255.0
 
@@ -34,16 +42,19 @@ def od_to_rgb(od: np.ndarray) -> np.ndarray:
     return np.clip(np.exp(-np.asarray(od, dtype=np.float64)), 0.0, 1.0)
 
 
-def _pixels(tiles) -> Tuple[np.ndarray, tuple]:
-    """Return pixels as ``(n_pixels, 3)`` plus the ``(n, 3, H, W)`` shape of the tiles."""
-    arr = np.asarray(tiles, dtype=np.float64)
+def _pixels(tiles) -> Tuple[np.ndarray, tuple, tuple]:
+    """Return pixels as ``(n_pixels, 3)``, the ``(n, 3, H, W)`` shape, and the shape the caller passed."""
+    arr = to_numpy(tiles, dtype=np.float64)
+    given_shape = arr.shape
     if arr.ndim == 3:
         arr = arr[None]
     if arr.ndim != 4 or arr.shape[1] != 3:
         raise ValueError(f"expected RGB tiles as (n, 3, H, W) or (3, H, W), got shape {arr.shape}")
+    if not np.isfinite(arr).all():
+        raise ValueError("tile intensities must be finite (found NaN or inf)")
     if arr.min() < 0.0 or arr.max() > 1.0 + 1e-6:
         raise ValueError("tile intensities must lie in [0, 1]")
-    return arr.transpose(0, 2, 3, 1).reshape(-1, 3), arr.shape
+    return arr.transpose(0, 2, 3, 1).reshape(-1, 3), arr.shape, given_shape
 
 
 class MacenkoNormalizer:
@@ -64,6 +75,24 @@ class MacenkoNormalizer:
             matches the target's.
         max_pixels: Estimate from at most this many randomly chosen tissue pixels.
         seed: Seed for that random choice.
+
+    Tiles can be NumPy arrays or torch tensors (any float dtype, including
+    ``bfloat16``); the output is always a float32 NumPy array.
+
+    Example:
+        >>> rng = np.random.default_rng(0)
+        >>> def slide(h_colour, e_colour, n=4):
+        ...     # synthetic tiles: random amounts of two stains, in optical density
+        ...     conc = rng.gamma(2.0, 0.4, size=(2, n * 32 * 32))
+        ...     od = np.stack([h_colour, e_colour], axis=1) @ conc
+        ...     return od_to_rgb(od.T).reshape(n, 32, 32, 3).transpose(0, 3, 1, 2)
+        >>> reference = slide([0.65, 0.70, 0.29], [0.07, 0.99, 0.11])
+        >>> other = slide([0.50, 0.80, 0.33], [0.20, 0.90, 0.38])
+        >>> normalizer = MacenkoNormalizer().fit(reference)
+        >>> normalizer.stain_matrix.shape
+        (3, 2)
+        >>> normalizer.transform(other).shape
+        (4, 3, 32, 32)
     """
 
     def __init__(self, od_threshold: float = 0.15, angle_percentile: float = 1.0,
@@ -121,10 +150,10 @@ class MacenkoNormalizer:
         """
         if self.stain_matrix is None:
             raise RuntimeError("call fit(reference_tiles) first")
-        pixels, shape = _pixels(tiles)
+        pixels, shape, given_shape = _pixels(tiles)
         stains, max_c = self.estimate(tiles)
         od = rgb_to_od(pixels)
         conc = np.linalg.lstsq(stains, od.T, rcond=None)[0]
         conc = np.clip(conc, 0.0, None) * (self.max_concentration / np.maximum(max_c, 1e-8))[:, None]
         out = od_to_rgb((self.stain_matrix @ conc).T).reshape(shape[0], shape[2], shape[3], 3).transpose(0, 3, 1, 2)
-        return out.astype(np.float32).reshape(np.asarray(tiles).shape)
+        return out.astype(np.float32).reshape(given_shape)

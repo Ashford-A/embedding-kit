@@ -41,7 +41,7 @@ test_ids = labels.index[split["test"]]
 | `train_cap`, `val_cap` | at most this many training / validation samples per label; the overflow goes to test |
 | `max_per_label` | cap each label's pool before the fractions are applied, so large classes do not dominate (cannot be combined with the per-split caps) |
 
-Missing labels raise an error; fill or drop them explicitly before splitting.
+Missing labels raise an error; fill or drop them explicitly before splitting. Caps must be non-negative integers (or `None`), so a typo such as `train_cap=-1` raises instead of silently overlapping the splits.
 
 ---
 
@@ -95,7 +95,7 @@ kept_peaks = atac_counts.columns[lsi.features_]               # peaks that passe
 | `scale` | `True` | standardize each component using training-set statistics |
 | `min_fraction`, `max_fraction` | 0.0, 1.0 | keep peaks detected in this range of training samples |
 
-Query samples must be quantified on the **same peak set** as the training samples, in the same column order. Independently called peaks are not comparable.
+Query samples must be quantified on the **same peak set** as the training samples; independently called peaks are not comparable. When you fit on a DataFrame, `transform` matches columns by name: a query DataFrame with the same peaks in a different order is put back in training order, and missing or extra peaks raise an error that names a few of them. A NumPy array has no names, so its columns must already be in training order.
 
 ---
 
@@ -116,6 +116,10 @@ slide_b = normalizer.transform(other_tiles)             # same shape, float32
 - **One slide at a time.** Stain colours are estimated from the pixels passed in, so call `transform` once per slide (or staining batch), not on a mix of slides.
 - **Background is ignored.** Pixels whose optical density is below `od_threshold` (default 0.15) in every channel are treated as glass. A call on tiles that are almost all background raises an error.
 - **Large slides.** The estimate uses at most `max_pixels` (default 200,000) randomly chosen tissue pixels, so it stays fast.
+
+Tiles must be finite: a NaN or infinite pixel raises an error naming the problem. Tiles can be NumPy arrays or torch tensors, including `bfloat16`; the output is always a float32 NumPy array.
+
+The method is from Macenko et al., "A method for normalizing histology slides for quantitative analysis", IEEE ISBI 2009, pp. 1107–1110 ([doi:10.1109/ISBI.2009.5193250](https://doi.org/10.1109/ISBI.2009.5193250)).
 
 `rgb_to_od` and `od_to_rgb` convert between intensity and optical density if you need them directly.
 
