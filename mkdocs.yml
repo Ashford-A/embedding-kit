@@ -47,6 +47,7 @@ nav:
       - Latent Geometry:
           - Overview: api/geometry.md
           - Hierarchy: api/analysis/hierarchy.md
+          - Usage Guide: guides/latent_geometry.md
 
 theme: readthedocs
 
