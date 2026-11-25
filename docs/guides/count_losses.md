@@ -2,6 +2,8 @@
 
 This page shows how to train on raw counts with likelihood-based losses, how to write a custom loss from the element-wise negative log-likelihoods, and how to align the embeddings of two paired data types.
 
+**Precision.** Every loss on this page accepts `bfloat16` and `float16` tensors. The likelihoods are evaluated in float32 for those dtypes (lgamma and the log terms lose too much precision otherwise) and the result is cast back to the input dtype, so mixed-precision training works unchanged.
+
 ---
 
 ## Which loss for which data

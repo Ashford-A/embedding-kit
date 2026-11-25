@@ -151,3 +151,50 @@ class TestNBVAELoss(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReviewRegressions(unittest.TestCase):
+    """Cases from code review: large ZINB logits, float32 beta endpoints, reduced precision."""
+
+    def test_zinb_finite_for_large_inflation_logits(self):
+        x = torch.tensor([[0.0, 3.0]])
+        mu, theta = torch.full((1, 2), 2.0), torch.ones(1, 2)
+        for logit in (20.0, -20.0, 80.0, -80.0):
+            out = zinb_nll(x, mu, theta, torch.full((1, 2), logit))
+            self.assertTrue(torch.isfinite(out).all(), logit)
+        # with pi -> 1, a positive count costs about the logit itself; a zero costs ~nothing
+        out = zinb_nll(x, mu, theta, torch.full((1, 2), 20.0))
+        self.assertLess(float(out[0, 0]), 1e-6)
+        expected_pos = 20.0 + float(nb_nll(x[:, 1:], mu[:, 1:], theta[:, 1:]))
+        self.assertAlmostEqual(float(out[0, 1]), expected_pos, places=3)
+
+    def test_zinb_gradients_finite(self):
+        logit = torch.full((1, 2), 20.0, requires_grad=True)
+        zinb_nll(torch.tensor([[0.0, 3.0]]), torch.full((1, 2), 2.0), torch.ones(1, 2), logit).sum().backward()
+        self.assertTrue(torch.isfinite(logit.grad).all())
+
+    def test_beta_endpoints_finite_in_float32(self):
+        x = torch.tensor([[0.0, 1.0]], dtype=torch.float32)
+        for a, b in ((2.0, 2.0), (1.0, 1.0), (0.5, 2.0)):
+            out = beta_nll(x, torch.full((1, 2), a), torch.full((1, 2), b))
+            self.assertTrue(torch.isfinite(out).all(), (a, b))
+
+    def test_reduced_precision_computed_in_float32(self):
+        torch.manual_seed(0)
+        x = torch.poisson(torch.rand(64, 500) * 30)
+        mu, theta = torch.rand(64, 500) * 30 + 0.5, torch.rand(64, 500) * 5 + 0.5
+        bf = [t.to(torch.bfloat16) for t in (x, mu, theta)]
+        out = nb_nll(*bf)
+        self.assertEqual(out.dtype, torch.bfloat16)
+        exact = nb_nll(*[t.double() for t in bf]).sum(1)          # same rounded inputs, float64
+        rel = ((out.double().sum(1) - exact).abs() / exact.abs()).max()
+        self.assertLess(float(rel), 1e-2)                         # only the final cast to bf16 is lossy
+
+    def test_vae_losses_accept_bfloat16(self):
+        bf = torch.bfloat16
+        x = torch.poisson(torch.rand(4, 6) * 3).to(bf)
+        recon, mu, logvar = torch.randn(4, 6).to(bf), torch.randn(4, 2).to(bf), torch.randn(4, 2).to(bf)
+        for loss_fn in (PoissonVAELoss(), NBVAELoss(n_features=6)):
+            out = loss_fn(recon, x, mu, logvar)
+            self.assertEqual(out.total.dtype, bf)
+            self.assertTrue(torch.isfinite(out.total.float()))

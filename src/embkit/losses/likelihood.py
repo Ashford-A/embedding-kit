@@ -19,8 +19,13 @@ This module provides:
   work with :func:`embkit.optimize.fit_vae`: :class:`PoissonVAELoss` and
   :class:`NBVAELoss`.
 
+Reduced precision: inputs in ``bfloat16`` or ``float16`` are computed in
+``float32`` (``lgamma`` and ``log`` lose too much precision otherwise) and the
+result is cast back to the input dtype.
+
 Ported from UniVII (the likelihood terms of ``UniVIMultiModalVAE``).
 """
+import functools
 from typing import Optional, Tuple
 
 import torch
@@ -30,12 +35,41 @@ from torch import nn, Tensor
 from .base import VAELoss, VAELossOutput
 
 _EPS = 1e-8
+_REDUCED_PRECISION = (torch.bfloat16, torch.float16)
+
+
+def _full_precision(fn):
+    """Run ``fn`` in at least float32 when its floating-point inputs are bfloat16/float16; cast the result back."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        floats = [a for a in list(args) + list(kwargs.values()) if torch.is_tensor(a) and a.is_floating_point()]
+        out_dtype = functools.reduce(torch.promote_types, (a.dtype for a in floats)) if floats else None
+        if out_dtype not in _REDUCED_PRECISION:
+            return fn(*args, **kwargs)
+        up = lambda a: a.float() if torch.is_tensor(a) and a.is_floating_point() else a
+        out = fn(*[up(a) for a in args], **{k: up(v) for k, v in kwargs.items()})
+        return out.to(out_dtype)
+    return wrapper
+
+
+def _upcast(*tensors: Tensor):
+    """Return the tensors in at least float32, plus the dtype to cast results back to."""
+    out_dtype = tensors[0].dtype
+    if out_dtype in _REDUCED_PRECISION:
+        return [t.float() for t in tensors], out_dtype
+    return list(tensors), out_dtype
+
+
+def _clip_eps(eps: float, dtype: torch.dtype) -> float:
+    """Smallest margin that keeps ``1 - eps`` below 1 in ``dtype``."""
+    return max(float(eps), float(torch.finfo(dtype).eps))
 
 
 # ---------------------------------------------------------------------------
 # Element-wise negative log-likelihoods
 # ---------------------------------------------------------------------------
 
+@_full_precision
 def gaussian_nll(x: Tensor, mean: Tensor, logvar: Optional[Tensor] = None,
                  logvar_min: float = -10.0, logvar_max: float = 10.0) -> Tensor:
     """
@@ -51,6 +85,7 @@ def gaussian_nll(x: Tensor, mean: Tensor, logvar: Optional[Tensor] = None,
     return 0.5 * (logvar + (x - mean) ** 2 / (torch.exp(logvar) + _EPS))
 
 
+@_full_precision
 def poisson_nll(x: Tensor, log_rate: Tensor) -> Tensor:
     """
     Poisson negative log-likelihood from a log-rate, element-wise.
@@ -60,6 +95,7 @@ def poisson_nll(x: Tensor, log_rate: Tensor) -> Tensor:
     return F.poisson_nll_loss(log_rate, x, log_input=True, full=False, reduction="none")
 
 
+@_full_precision
 def nb_nll(x: Tensor, mu: Tensor, theta: Tensor, eps: float = _EPS) -> Tensor:
     """
     Negative binomial negative log-likelihood, element-wise.
@@ -81,6 +117,7 @@ def nb_nll(x: Tensor, mu: Tensor, theta: Tensor, eps: float = _EPS) -> Tensor:
     return -(t1 + t2 + t3)
 
 
+@_full_precision
 def zinb_nll(x: Tensor, mu: Tensor, theta: Tensor, logit_pi: Tensor, eps: float = _EPS) -> Tensor:
     """
     Zero-inflated negative binomial negative log-likelihood, element-wise.
@@ -90,31 +127,38 @@ def zinb_nll(x: Tensor, mu: Tensor, theta: Tensor, logit_pi: Tensor, eps: float 
     """
     mu = mu.clamp(min=eps)
     theta = theta.clamp(min=eps)
-    pi = torch.sigmoid(logit_pi)
+    # mixture weights in log space: log(pi) and log(1 - pi) stay finite for any finite logit
+    log_pi = F.logsigmoid(logit_pi)
+    log_one_minus_pi = F.logsigmoid(-logit_pi)
     t1 = torch.lgamma(x + theta) - torch.lgamma(theta) - torch.lgamma(x + 1.0)
     t2 = theta * (torch.log(theta) - torch.log(theta + mu))
     t3 = x * (torch.log(mu) - torch.log(theta + mu))
     log_nb = t1 + t2 + t3
     is_zero = x < eps
-    log_prob_pos = torch.log1p(-pi + eps) + log_nb
+    log_prob_pos = log_one_minus_pi + log_nb
     log_nb_zero = theta * (torch.log(theta) - torch.log(theta + mu))
-    log_prob_zero = torch.log(pi + (1.0 - pi) * torch.exp(log_nb_zero) + eps)
+    log_prob_zero = torch.logaddexp(log_pi, log_one_minus_pi + log_nb_zero)
     return -torch.where(is_zero, log_prob_zero, log_prob_pos)
 
 
+@_full_precision
 def beta_nll(x: Tensor, alpha: Tensor, beta: Tensor, eps: float = _EPS) -> Tensor:
     """
     Beta negative log-likelihood for fractions in ``(0, 1)``, element-wise.
 
-    ``x`` is clamped to ``[eps, 1 - eps]`` so exact 0/1 values stay finite.
+    ``x`` is clamped to ``[eps, 1 - eps]`` so exact 0/1 values stay finite; the
+    margin is raised to the dtype's machine epsilon when ``eps`` is too small to
+    move ``1 - eps`` below 1 (for example ``1e-8`` in float32).
     """
-    x = x.clamp(min=eps, max=1.0 - eps)
+    margin = _clip_eps(eps, x.dtype)
+    x = x.clamp(min=margin, max=1.0 - margin)
     alpha = alpha.clamp(min=eps)
     beta = beta.clamp(min=eps)
     log_norm = torch.lgamma(alpha) + torch.lgamma(beta) - torch.lgamma(alpha + beta)
     return -((alpha - 1.0) * torch.log(x) + (beta - 1.0) * torch.log(1.0 - x) - log_norm)
 
 
+@_full_precision
 def binomial_nll(successes: Tensor, total_count: Tensor, logits: Tensor) -> Tensor:
     """
     Binomial negative log-likelihood (successes out of ``total_count`` trials), element-wise.
@@ -129,6 +173,7 @@ def binomial_nll(successes: Tensor, total_count: Tensor, logits: Tensor) -> Tens
     return -(comb + log_prob)
 
 
+@_full_precision
 def beta_binomial_nll(successes: Tensor, total_count: Tensor, alpha: Tensor, beta: Tensor,
                       eps: float = _EPS) -> Tensor:
     """
@@ -180,10 +225,12 @@ class PoissonVAELoss(VAELoss):
         mu: Tensor,
         logvar: Tensor,
     ) -> Tuple[Tensor, Tensor, Tensor]:
+        (recon, x, mu, logvar), out_dtype = _upcast(recon, x, mu, logvar)
         recon_loss = poisson_nll(x, recon).sum(dim=1)
         kl_loss = self._kl_divergence(mu, logvar)
         total = (recon_loss + self.beta * kl_loss).mean()
-        return VAELossOutput(total=total, recon=recon_loss.mean(), kl=kl_loss.mean())
+        return VAELossOutput(total=total.to(out_dtype), recon=recon_loss.mean().to(out_dtype),
+                             kl=kl_loss.mean().to(out_dtype))
 
 
 class NBVAELoss(VAELoss):
@@ -228,9 +275,11 @@ class NBVAELoss(VAELoss):
         mu: Tensor,
         logvar: Tensor,
     ) -> Tuple[Tensor, Tensor, Tensor]:
+        (recon, x, mu, logvar), out_dtype = _upcast(recon, x, mu, logvar)
         mean = F.softplus(recon) + _EPS
         theta = torch.exp(self.log_theta.to(device=recon.device, dtype=recon.dtype))
         recon_loss = nb_nll(x, mean, theta.expand_as(mean)).sum(dim=1)
         kl_loss = self._kl_divergence(mu, logvar)
         total = (recon_loss + self.beta * kl_loss).mean()
-        return VAELossOutput(total=total, recon=recon_loss.mean(), kl=kl_loss.mean())
+        return VAELossOutput(total=total.to(out_dtype), recon=recon_loss.mean().to(out_dtype),
+                             kl=kl_loss.mean().to(out_dtype))

@@ -35,6 +35,11 @@ class TestPairwiseAlignment(unittest.TestCase):
     def test_single_view_is_zero(self):
         self.assertTrue(torch.equal(pairwise_alignment_loss([torch.randn(4, 3)]), torch.zeros(4)))
 
+    def test_single_view_backward_gives_zero_gradients(self):
+        mu = torch.randn(4, 3, requires_grad=True)
+        pairwise_alignment_loss([mu]).mean().backward()
+        self.assertTrue(torch.equal(mu.grad, torch.zeros(4, 3)))
+
     def test_no_views(self):
         with self.assertRaises(ValueError):
             pairwise_alignment_loss([])

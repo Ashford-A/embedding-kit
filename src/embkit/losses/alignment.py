@@ -72,7 +72,8 @@ def pairwise_alignment_loss(mus: Union[Sequence[Tensor], Mapping[str, Tensor]]) 
     if len(views) == 0:
         raise ValueError("pairwise_alignment_loss needs at least one view")
     if len(views) < 2:
-        return torch.zeros(views[0].size(0), device=views[0].device, dtype=views[0].dtype)
+        # a zero that stays on the autograd graph, so backward() gives zero gradients rather than an error
+        return (views[0] * 0).sum(dim=-1)
     losses = []
     for i in range(len(views)):
         for j in range(i + 1, len(views)):
