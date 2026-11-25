@@ -28,6 +28,8 @@ import torch
 from sklearn.neighbors import NearestNeighbors
 from torch.utils.data import Sampler
 
+from .utilities.arrays import to_numpy
+
 Matrix = Union[np.ndarray, sp.spmatrix]
 
 
@@ -48,7 +50,7 @@ def knn_graph(coords: np.ndarray, k: int = 6) -> Tuple[np.ndarray, np.ndarray]:
     Returns:
         Tuple ``(idx, dist)``, both ``(n, k)``.
     """
-    coords = np.asarray(coords, dtype=float)
+    coords = to_numpy(coords, dtype=float)
     if coords.ndim != 2:
         raise ValueError("coords must be (n, dims)")
     if not 1 <= int(k) < coords.shape[0]:
@@ -123,7 +125,9 @@ def neighborhood_aggregate(X: Matrix, coords: np.ndarray, k: int = 6, kernel: st
     Returns:
         Matrix of the same shape as ``X`` (sparse in, sparse out).
     """
-    coords = np.asarray(coords, dtype=float)
+    coords = to_numpy(coords, dtype=float)
+    if torch.is_tensor(X):
+        X = to_numpy(X)
     if groups is None:
         out = neighborhood_weights(coords, k, kernel, sigma, include_self) @ X
         return out.tocsr() if sp.issparse(out) else np.asarray(out)
@@ -159,7 +163,7 @@ def extract_tiles(image: np.ndarray, centers_xy: np.ndarray, tile_size: int, out
     Raises:
         ValueError: On malformed inputs or centres outside the image.
     """
-    img = np.asarray(image)
+    img = to_numpy(image)
     if img.ndim == 2:
         img = img[:, :, None]
     if img.ndim != 3:
@@ -168,7 +172,7 @@ def extract_tiles(image: np.ndarray, centers_xy: np.ndarray, tile_size: int, out
     if tile_size < 1:
         raise ValueError("tile_size must be >= 1")
     img = img.astype(np.float32) / 255.0 if np.issubdtype(img.dtype, np.integer) else img.astype(np.float32)
-    centers = np.asarray(centers_xy, dtype=float)
+    centers = to_numpy(centers_xy, dtype=float)
     if centers.ndim != 2 or centers.shape[1] != 2:
         raise ValueError("centers_xy must be (n, 2) as (x, y)")
     H, W, C = img.shape
@@ -194,7 +198,7 @@ def extract_tiles(image: np.ndarray, centers_xy: np.ndarray, tile_size: int, out
 
 def unflatten_tiles(X: Matrix, shape: Sequence[int]) -> np.ndarray:
     """Flat ``(n, C * H * W)`` matrix -> ``(n, C, H, W)``; ``shape`` is ``(C, H, W)``."""
-    X = np.asarray(X.todense()) if sp.issparse(X) else np.asarray(X)
+    X = np.asarray(X.todense()) if sp.issparse(X) else to_numpy(X)
     return X.reshape(X.shape[0], *[int(v) for v in shape])
 
 
@@ -220,7 +224,7 @@ class SpatialBlockSampler(Sampler[List[int]]):
     """
 
     def __init__(self, coords: np.ndarray, batch_size: int = 256, groups: Optional[Sequence[Any]] = None, seed: int = 0):
-        self.coords = np.asarray(coords, dtype=float)
+        self.coords = to_numpy(coords, dtype=float)
         self.batch_size = int(batch_size)
         if self.batch_size < 2:
             raise ValueError("batch_size must be >= 2")

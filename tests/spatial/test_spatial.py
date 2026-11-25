@@ -143,5 +143,31 @@ class TestSpatialBlockSampler(unittest.TestCase):
             S.SpatialBlockSampler(_grid(), batch_size=1)
 
 
+
+class TestReducedPrecisionInputs(unittest.TestCase):
+    """bfloat16 tensors are accepted wherever arrays are (review: library dtype convention)."""
+
+    def test_bf16_coords_and_features(self):
+        coords = torch.tensor(_grid()).to(torch.bfloat16)
+        idx, _ = S.knn_graph(coords, k=4)
+        np.testing.assert_array_equal(idx, S.knn_graph(_grid(), k=4)[0])
+        X = torch.arange(36 * 3, dtype=torch.float32).reshape(36, 3).to(torch.bfloat16)
+        out = S.neighborhood_aggregate(X, coords, k=4)
+        expected = S.neighborhood_aggregate(X.float().numpy(), _grid(), k=4)
+        np.testing.assert_allclose(out, expected)
+        sampler = S.SpatialBlockSampler(coords, batch_size=6, seed=0)
+        self.assertEqual(sorted({i for batch in sampler for i in batch}), list(range(36)))
+
+    def test_bf16_and_uint8_images(self):
+        image = np.random.default_rng(0).integers(0, 256, size=(32, 32, 3), dtype=np.uint8)
+        centers = np.array([[8.0, 8.0], [20.0, 16.0]])
+        from_uint8_tensor = S.extract_tiles(torch.from_numpy(image), centers, tile_size=8)
+        np.testing.assert_allclose(from_uint8_tensor, S.extract_tiles(image, centers, tile_size=8))
+        as_float = image.astype(np.float32) / 255.0
+        from_bf16 = S.extract_tiles(torch.tensor(as_float).to(torch.bfloat16), torch.tensor(centers), tile_size=8)
+        np.testing.assert_allclose(from_bf16, S.extract_tiles(as_float, centers, tile_size=8), atol=4e-3)
+        self.assertEqual(S.unflatten_tiles(torch.tensor(from_bf16).to(torch.bfloat16), (3, 8, 8)).shape, (2, 3, 8, 8))
+
+
 if __name__ == "__main__":
     unittest.main()

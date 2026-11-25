@@ -26,6 +26,8 @@ from scipy.optimize import linear_sum_assignment
 from sklearn.metrics import pairwise_distances
 from sklearn.neighbors import NearestNeighbors
 
+from .utilities.arrays import to_numpy
+
 
 def _subsample_indices(n: int, max_samples: int, rng: np.random.Generator) -> np.ndarray:
     """Up to ``max_samples`` indices from ``range(n)``, without replacement."""
@@ -54,7 +56,7 @@ def bipartite_match(XA: np.ndarray, XB: np.ndarray, metric: str = "euclidean", m
         Tuple ``(idx_a, idx_b)`` of equal length: ``XA[idx_a[i]]`` is matched to ``XB[idx_b[i]]``.
     """
     rng = np.random.default_rng(random_state)
-    XA, XB = np.asarray(XA), np.asarray(XB)
+    XA, XB = to_numpy(XA), to_numpy(XB)
     n = min(XA.shape[0], XB.shape[0], int(max_samples))
     idx_a = _subsample_indices(XA.shape[0], n, rng)
     idx_b = _subsample_indices(XB.shape[0], n, rng)
@@ -84,7 +86,7 @@ def mnn_anchors(XA: np.ndarray, XB: np.ndarray, k: int = 20, max_samples: int = 
         if none are found).
     """
     rng = np.random.default_rng(random_state)
-    XA, XB = np.asarray(XA), np.asarray(XB)
+    XA, XB = to_numpy(XA), to_numpy(XB)
     idx_a = _subsample_indices(XA.shape[0], int(max_samples), rng)
     idx_b = _subsample_indices(XB.shape[0], int(max_samples), rng)
     XA_sub, XB_sub = XA[idx_a], XB[idx_b]

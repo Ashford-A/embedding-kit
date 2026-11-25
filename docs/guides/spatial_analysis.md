@@ -2,6 +2,8 @@
 
 This page shows how to prepare spatial assays (Visium, Xenium, CosMx, imaging mass cytometry) for embedding models, how to match samples between two datasets, how to attribute a trained model's output to its input features, and how to make runs reproducible.
 
+**Precision.** Coordinates, features, images and embeddings can be NumPy arrays or torch tensors of any dtype, including `bfloat16`; the array outputs are NumPy. `integrated_gradients` calls your model with tensors of the input's dtype and returns attributions in that dtype.
+
 ---
 
 ## Spatial data at a glance

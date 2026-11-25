@@ -79,5 +79,29 @@ class TestSetSeed(unittest.TestCase):
         torch.backends.cudnn.deterministic = False
 
 
+
+class TestReducedPrecisionInputs(unittest.TestCase):
+    """bfloat16 tensors are accepted (review: library dtype convention)."""
+
+    def test_matching_bf16(self):
+        rng = np.random.default_rng(0)
+        XA = rng.normal(size=(30, 4))
+        perm = rng.permutation(30)
+        XB = XA[perm]
+        a, b = bipartite_match(torch.tensor(XA).to(torch.bfloat16), torch.tensor(XB).to(torch.bfloat16))
+        np.testing.assert_array_equal(perm[b], a)
+        ia, ib = mnn_anchors(torch.tensor(XA).to(torch.bfloat16), torch.tensor(XB).to(torch.bfloat16), k=1)
+        self.assertGreater(len(ia), 0)
+
+    def test_integrated_gradients_bf16(self):
+        w = torch.tensor([1.0, -2.0, 0.5])
+        x = torch.tensor([[1.0, 2.0, 3.0], [0.5, -1.0, 2.0]])
+        f = lambda z: z @ w.to(z.dtype)
+        attr = integrated_gradients(f, x.to(torch.bfloat16), steps=16)
+        self.assertEqual(attr.dtype, torch.bfloat16)
+        # linear model: attribution is exactly x * w; bf16 keeps ~3 significant digits
+        torch.testing.assert_close(attr.float(), x * w, rtol=1e-2, atol=1e-2)
+
+
 if __name__ == "__main__":
     unittest.main()
