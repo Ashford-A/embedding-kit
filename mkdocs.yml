@@ -32,6 +32,7 @@ nav:
           - Conv Backbone / Decoder: api/layers/conv.md
           - Product of Experts: api/layers/fusion.md
           - Gradient Reversal: api/layers/grad_reverse.md
+          - Usage Guide: guides/building_blocks.md
       - Losses:
           - Overview: api/losses/index.md
           - VAE Loss: api/losses/vae_loss.md
