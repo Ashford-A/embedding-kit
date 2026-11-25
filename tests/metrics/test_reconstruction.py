@@ -74,3 +74,31 @@ class TestDeviationScores(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReviewRegressions(unittest.TestCase):
+    """Cases raised in review: integer overflow, scale-dependent Pearson, bf16."""
+
+    def test_mse_integer_inputs_do_not_wrap(self):
+        out = mse_per_feature(np.array([[0]], np.uint8), np.array([[16]], np.uint8))
+        np.testing.assert_allclose(out, [256.0])
+
+    def test_pearson_is_scale_free(self):
+        x = np.array([[0.0], [1e-6], [2e-6]])
+        np.testing.assert_allclose(pearson_corr_per_feature(x, x), [1.0])
+        np.testing.assert_allclose(pearson_corr_per_feature(x, -x), [-1.0])
+
+    def test_pearson_constant_feature_is_zero(self):
+        x = np.array([[1.0, 0.0], [1.0, 1.0], [1.0, 2.0]])
+        out = pearson_corr_per_feature(x, x)
+        np.testing.assert_allclose(out, [0.0, 1.0])
+
+    def test_bfloat16_tensors(self):
+        torch.manual_seed(0)
+        x = torch.randn(25, 3).to(torch.bfloat16)
+        np.testing.assert_allclose(mse_per_feature(x, x), np.zeros(3))
+        np.testing.assert_allclose(pearson_corr_per_feature(x, x), np.ones(3), atol=1e-12)
+        self.assertEqual(deviation_scores(x[:, 0], x[:, 1]).shape, (25,))
+        b = (torch.rand(25, 2) > 0.5).to(torch.bfloat16)
+        b[0], b[1] = 0, 1
+        self.assertEqual(auc_per_feature_binary(b, x[:, :2]).shape, (2,))

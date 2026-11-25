@@ -2,6 +2,8 @@
 
 This page shows how to score an embedding that integrates two data types measured on the same samples, and how to check reconstruction quality feature by feature.
 
+**Precision.** Every metric on this page accepts NumPy arrays or torch tensors of any dtype, including `bfloat16` and integer counts. They compute in float64 and return NumPy values.
+
 ---
 
 ## What you need

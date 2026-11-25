@@ -18,8 +18,9 @@ Ported from UniVII (``univii.evaluation`` and ``univii.reference``).
 from typing import Any, Dict
 
 import numpy as np
-import torch
 from sklearn.metrics import roc_auc_score
+
+from ..utilities.arrays import to_numpy
 
 
 def _check_same_shape(x_true: np.ndarray, x_pred: np.ndarray) -> None:
@@ -28,8 +29,9 @@ def _check_same_shape(x_true: np.ndarray, x_pred: np.ndarray) -> None:
 
 
 def mse_per_feature(x_true: np.ndarray, x_pred: np.ndarray) -> np.ndarray:
-    """Mean squared error of each feature (column), ``(n_features,)``."""
-    x_true, x_pred = np.asarray(x_true), np.asarray(x_pred)
+    """Mean squared error of each feature (column), ``(n_features,)``, computed in float64."""
+    # float64 first: integer inputs would otherwise wrap around when subtracted and squared
+    x_true, x_pred = to_numpy(x_true, dtype=np.float64), to_numpy(x_pred, dtype=np.float64)
     _check_same_shape(x_true, x_pred)
     return np.mean((x_true - x_pred) ** 2, axis=0)
 
@@ -38,16 +40,20 @@ def pearson_corr_per_feature(x_true: np.ndarray, x_pred: np.ndarray) -> np.ndarr
     """
     Pearson correlation of each feature between observed and reconstructed values, ``(n_features,)``.
 
-    Constant features give 0 rather than NaN.
+    Computed in float64. Constant features (zero variance in either input) give
+    0 rather than NaN; every other feature gets its exact correlation, whatever
+    its scale.
     """
-    x_true = np.asarray(x_true, dtype=np.float32)
-    x_pred = np.asarray(x_pred, dtype=np.float32)
+    x_true = to_numpy(x_true, dtype=np.float64)
+    x_pred = to_numpy(x_pred, dtype=np.float64)
     _check_same_shape(x_true, x_pred)
     x_true_c = x_true - x_true.mean(axis=0, keepdims=True)
     x_pred_c = x_pred - x_pred.mean(axis=0, keepdims=True)
     num = (x_true_c * x_pred_c).sum(axis=0)
-    denom = np.sqrt((x_true_c ** 2).sum(axis=0) * (x_pred_c ** 2).sum(axis=0)) + 1e-8
-    return num / denom
+    denom = np.sqrt((x_true_c ** 2).sum(axis=0) * (x_pred_c ** 2).sum(axis=0))
+    out = np.zeros_like(num)
+    np.divide(num, denom, out=out, where=denom > 0)
+    return out
 
 
 def auc_per_feature_binary(x_true01: np.ndarray, x_score: np.ndarray) -> np.ndarray:
@@ -57,7 +63,7 @@ def auc_per_feature_binary(x_true01: np.ndarray, x_score: np.ndarray) -> np.ndar
     ``x_score`` may be probabilities or logits. Features whose ground truth is
     constant get NaN.
     """
-    x_true01, x_score = np.asarray(x_true01), np.asarray(x_score)
+    x_true01, x_score = to_numpy(x_true01), to_numpy(x_score)
     _check_same_shape(x_true01, x_score)
     aucs = np.full(x_true01.shape[1], np.nan, dtype=np.float32)
     for j in range(x_true01.shape[1]):
@@ -115,8 +121,8 @@ def deviation_scores(nll_query, nll_null) -> np.ndarray:
     Raises:
         ValueError: If the null population has zero spread.
     """
-    q = np.asarray(nll_query.detach().cpu() if torch.is_tensor(nll_query) else nll_query, dtype=float)
-    n = np.asarray(nll_null.detach().cpu() if torch.is_tensor(nll_null) else nll_null, dtype=float)
+    q = to_numpy(nll_query, dtype=float)
+    n = to_numpy(nll_null, dtype=float)
     med = np.median(n)
     mad = 1.4826 * np.median(np.abs(n - med))
     if not mad > 0:

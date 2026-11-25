@@ -3,6 +3,7 @@
 import unittest
 
 import numpy as np
+import torch
 
 from embkit.metrics.alignment import foscttm, match_recall_at_k, modality_mixing, modality_entropy
 
@@ -93,3 +94,37 @@ class TestMixingAndEntropy(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReviewRegressions(unittest.TestCase):
+    """Cases raised in review: precision far from the origin, ties, zero rows, bf16."""
+
+    def test_far_from_origin_keeps_order(self):
+        # float32 |a|^2 + |b|^2 - 2ab cancels to 0 here and made every pair a tie.
+        Z1 = np.array([[10000.0], [10001.0]], dtype=np.float32)
+        Z2 = Z1[::-1].copy()
+        self.assertEqual(foscttm(Z1, Z2), 1.0)
+        self.assertEqual(match_recall_at_k(Z1, Z2, k=1), 0.0)
+        self.assertEqual(foscttm(Z1, Z1), 0.0)
+
+    def test_zero_rows_are_not_perfect_cosine_matches(self):
+        Z1 = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+        Z2 = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+        per = foscttm(Z1, Z2, metric="cosine", return_per_sample=True)[1]
+        self.assertTrue(np.all(np.isfinite(per)))
+        self.assertEqual(per[1], 0.0)
+
+    def test_self_neighbours_exclude_self_with_duplicates(self):
+        # Two coincident points from different modalities: each one's only
+        # neighbour is the other, so mixing is 1, not 0.5.
+        labels = np.array(["a", "b"])
+        self.assertEqual(modality_mixing(np.zeros((2, 2)), labels, k=1), 1.0)
+
+    def test_bfloat16_tensors(self):
+        torch.manual_seed(0)
+        Z = torch.randn(30, 4).to(torch.bfloat16)
+        self.assertEqual(foscttm(Z, Z), 0.0)
+        self.assertEqual(match_recall_at_k(Z, Z, k=1), 1.0)
+        labels = np.array(["a", "b"] * 15)
+        self.assertTrue(0.0 <= modality_mixing(Z, labels, k=5) <= 1.0)
+        self.assertTrue(np.isfinite(modality_entropy(Z, labels, k=5)))

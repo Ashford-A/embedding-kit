@@ -24,7 +24,10 @@ Ported from UniVII (``univii.evaluation``).
 from typing import Tuple, Union
 
 import numpy as np
+from scipy.spatial.distance import cdist
 from sklearn.neighbors import NearestNeighbors
+
+from ..utilities.arrays import to_numpy
 
 MetricResult = Union[float, Tuple[float, float], Tuple[float, np.ndarray], Tuple[float, float, np.ndarray]]
 
@@ -50,30 +53,31 @@ def _package(values: np.ndarray, return_sem: bool, return_per_sample: bool) -> M
 
 
 def _cross_distance_blocks(Z1: np.ndarray, Z2: np.ndarray, metric: str, block_size: int):
-    """Yield ``(start, stop, distance block)`` of Z1 rows against all Z2 rows."""
+    """
+    Yield ``(start, stop, distance block)`` of Z1 rows against all Z2 rows.
+
+    Uses SciPy's ``cdist`` in float64, which works from coordinate
+    differences: expanding ``|a|^2 + |b|^2 - 2ab`` in float32 cancels real
+    distances between points far from the origin and creates false ties.
+    A cosine distance involving an all-zero row is undefined; it is set to 1
+    (orthogonal) so such rows never look like perfect matches.
+    """
     metric = str(metric).lower().strip()
     if metric not in {"euclidean", "cosine"}:
         raise ValueError("metric must be 'euclidean' or 'cosine'")
+    kind = "sqeuclidean" if metric == "euclidean" else "cosine"
     n = Z1.shape[0]
-    Z2_T = Z2.T
-    if metric == "euclidean":
-        n2 = np.sum(Z2 * Z2, axis=1)
-    else:
-        n2 = np.linalg.norm(Z2, axis=1) + 1e-8
     for i0 in range(0, n, int(block_size)):
         i1 = min(i0 + int(block_size), n)
-        A = Z1[i0:i1]
-        if metric == "euclidean":
-            d = np.sum(A * A, axis=1)[:, None] + n2[None, :] - 2.0 * (A @ Z2_T)
-        else:
-            n1 = np.linalg.norm(A, axis=1) + 1e-8
-            d = 1.0 - (A @ Z2_T) / (n1[:, None] * n2[None, :])
+        d = cdist(Z1[i0:i1], Z2, metric=kind)
+        if kind == "cosine":
+            d = np.nan_to_num(d, nan=1.0)
         yield i0, i1, d
 
 
 def _paired(Z1, Z2) -> Tuple[np.ndarray, np.ndarray]:
-    Z1 = np.asarray(Z1, dtype=np.float32)
-    Z2 = np.asarray(Z2, dtype=np.float32)
+    Z1 = to_numpy(Z1, dtype=np.float64)
+    Z2 = to_numpy(Z2, dtype=np.float64)
     if Z1.shape != Z2.shape:
         raise ValueError(f"Z1 and Z2 must have the same shape (row i = same sample), got {Z1.shape} vs {Z2.shape}")
     return Z1, Z2
@@ -146,8 +150,9 @@ def match_recall_at_k(Z1: np.ndarray, Z2: np.ndarray, k: int = 10, metric: str =
 
 
 def _self_neighbors(Z: np.ndarray, k: int, metric: str) -> np.ndarray:
-    nn = NearestNeighbors(n_neighbors=k + 1, metric=str(metric)).fit(Z)
-    return nn.kneighbors(Z, return_distance=False)[:, 1:]
+    """Each row's ``k`` nearest other rows; querying the fitted set excludes each row by index, even with ties."""
+    nn = NearestNeighbors(n_neighbors=k, metric=str(metric)).fit(Z)
+    return nn.kneighbors(return_distance=False)
 
 
 def modality_mixing(Z: np.ndarray, modality_labels: np.ndarray, k: int = 20, metric: str = "euclidean",
@@ -164,7 +169,7 @@ def modality_mixing(Z: np.ndarray, modality_labels: np.ndarray, k: int = 20, met
     Raises:
         ValueError: If ``Z`` and ``modality_labels`` differ in length.
     """
-    Z = np.asarray(Z, dtype=np.float32)
+    Z = to_numpy(Z, dtype=np.float64)
     modality_labels = np.asarray(modality_labels)
     if Z.shape[0] != modality_labels.shape[0]:
         raise ValueError("Z and modality_labels must have the same number of rows")
@@ -187,7 +192,7 @@ def modality_entropy(Z: np.ndarray, modality_labels: np.ndarray, k: int = 30, me
     Returns:
         Mean normalized entropy, optionally with SEM / per-sample values.
     """
-    Z = np.asarray(Z, dtype=np.float32)
+    Z = to_numpy(Z, dtype=np.float64)
     modality_labels = np.asarray(modality_labels)
     if Z.shape[0] != modality_labels.shape[0]:
         raise ValueError("Z and modality_labels must have the same number of rows")
