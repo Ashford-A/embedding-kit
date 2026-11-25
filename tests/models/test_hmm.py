@@ -64,6 +64,32 @@ class TestGaussianHMM(unittest.TestCase):
         self.assertEqual((rebuilt.n_states, rebuilt.dim, rebuilt.stickiness), (4, 2, 0.8))
 
 
+class TestHMMDevice(unittest.TestCase):
+    def test_numpy_input_follows_model_device(self):
+        hmm = GaussianHMM(2, 1)
+        self.assertEqual(hmm._x(np.zeros(5)).device, hmm.means.device)
+
+    def test_initialise_is_reproducible(self):
+        x = _three_segments()
+        a, b = GaussianHMM(3, 1), GaussianHMM(3, 1)
+        a.initialise(x, seed=4)
+        b.initialise(torch.as_tensor(x), seed=4)
+        self.assertTrue(torch.equal(a.means, b.means))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "needs a CUDA GPU")
+    def test_fit_and_inference_on_cuda(self):
+        seq = _three_segments()
+        cpu = GaussianHMM(3, 1, stickiness=0.95)
+        cpu.initialise(seq, seed=0)
+        gpu = GaussianHMM(3, 1, stickiness=0.95).to("cuda")
+        gpu.initialise(seq, seed=0)  # NumPy input, CUDA model
+        self.assertTrue(torch.allclose(gpu.means.cpu(), cpu.means))
+        gpu.fit(torch.as_tensor(seq).cuda(), n_iter=20, initialise=False)
+        self.assertEqual(gpu.viterbi(seq).device.type, "cuda")
+        self.assertEqual(gpu.posterior(seq).shape, (90, 3))
+        self.assertTrue(torch.isfinite(gpu.log_likelihood(seq)))
+
+
 class TestSegmentByOrder(unittest.TestCase):
     def test_returns_original_order(self):
         seq = _three_segments()

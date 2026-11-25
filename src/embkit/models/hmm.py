@@ -55,7 +55,9 @@ class GaussianHMM(nn.Module):
 
     # -- pieces ---------------------------------------------------------------
     def _x(self, x) -> torch.Tensor:
-        x = torch.as_tensor(np.asarray(x) if not torch.is_tensor(x) else x, dtype=torch.float64)
+        # observations follow the model's device, so NumPy input works on a model moved to a GPU
+        x = torch.as_tensor(np.asarray(x) if not torch.is_tensor(x) else x, dtype=torch.float64,
+                            device=self.means.device)
         if x.ndim == 1:
             x = x.unsqueeze(-1)
         if x.ndim not in (2, 3) or x.shape[-1] != self.dim:
@@ -115,15 +117,17 @@ class GaussianHMM(nn.Module):
         g = torch.Generator().manual_seed(int(seed))
         centred = x - x.mean(0)
         direction = (torch.linalg.svd(centred, full_matrices=False)[2][0] if x.shape[0] > 1
-                     else torch.ones(self.dim, dtype=x.dtype))
+                     else torch.ones(self.dim, dtype=x.dtype, device=x.device))
         order = torch.argsort(centred @ direction)
-        cuts = torch.linspace(0, x.shape[0], self.n_states + 1).long()
+        cuts = torch.linspace(0, x.shape[0], self.n_states + 1).long().tolist()
         with torch.no_grad():
             for k in range(self.n_states):
-                members = order[cuts[k]:max(int(cuts[k + 1]), int(cuts[k]) + 1)]
-                self.means[k] = x[members].mean(0) + 1e-3 * torch.randn(self.dim, generator=g, dtype=x.dtype)
+                members = order[cuts[k]:max(cuts[k + 1], cuts[k] + 1)]
+                # jitter is drawn on the CPU generator, so a given seed initialises identically on every device
+                jitter = torch.randn(self.dim, generator=g, dtype=x.dtype).to(x.device)
+                self.means[k] = x[members].mean(0) + 1e-3 * jitter
             # a single observation has no variance (var() would be NaN); fall back to the floor
-            var = x.var(0) if x.shape[0] > 1 else torch.zeros(self.dim, dtype=x.dtype)
+            var = x.var(0) if x.shape[0] > 1 else torch.zeros(self.dim, dtype=x.dtype, device=x.device)
             self.logvars.copy_(torch.log(var.clamp_min(1e-6)).expand_as(self.logvars))
 
     def fit(self, x, n_iter: int = 200, lr: float = 0.05, seed: int = 0, initialise: bool = True) -> "GaussianHMM":

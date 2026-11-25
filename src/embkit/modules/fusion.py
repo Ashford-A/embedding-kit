@@ -17,7 +17,6 @@ from typing import Optional, Sequence, Tuple
 
 import torch
 
-_EPS = 1e-8
 
 
 def product_of_experts(mus: Sequence[torch.Tensor], logvars: Sequence[torch.Tensor],
@@ -54,13 +53,14 @@ def product_of_experts(mus: Sequence[torch.Tensor], logvars: Sequence[torch.Tens
     if len(mus) == 1:
         # a single expert is its own product, whatever its weight
         return mus[0], logvars[0]
-    precisions = [torch.exp(-lv) for lv in logvars]
+    # work with log-precisions throughout, so no floor or clamp changes a valid product
+    log_prec = torch.stack([-lv for lv in logvars], dim=0)                        # (K, batch, latent_dim)
     if weights is not None:
         if weights.shape != (mus[0].shape[0], len(mus)):
             raise ValueError(f"weights must be (batch, n_experts) = ({mus[0].shape[0]}, {len(mus)}), "
                              f"got {tuple(weights.shape)}")
-        precisions = [(weights[:, i:i + 1] + weight_eps) * p for i, p in enumerate(precisions)]
-    precision_sum = torch.stack(precisions, dim=0).sum(dim=0).clamp_min(_EPS)
-    mu = torch.stack([m * p for m, p in zip(mus, precisions)], dim=0).sum(dim=0) / precision_sum
-    logvar = torch.log((1.0 / precision_sum).clamp_min(_EPS))
-    return mu, logvar
+        log_prec = log_prec + torch.log(weights + weight_eps).t().unsqueeze(-1)  # (K, batch, 1)
+    log_prec_sum = torch.logsumexp(log_prec, dim=0)
+    share = torch.exp(log_prec - log_prec_sum)                                     # normalized precisions, sum to 1
+    mu = (share * torch.stack(list(mus), dim=0)).sum(dim=0)
+    return mu, -log_prec_sum

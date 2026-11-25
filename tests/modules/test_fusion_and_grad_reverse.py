@@ -35,6 +35,30 @@ class TestProductOfExperts(unittest.TestCase):
         mu, _ = product_of_experts([a, b], [lv, lv], weights=w, weight_eps=0.0)
         self.assertTrue(torch.allclose(mu[0], a[0]) and torch.allclose(mu[1], b[1]))
 
+    def test_identical_experts_keep_their_mean_at_extreme_variances(self):
+        # regression: an absolute precision floor used to pull this mean to ~0.41
+        for lv in (20.0, -25.0, 60.0, -60.0):
+            mu, logvar = product_of_experts([torch.ones(1, 1)] * 2, [torch.full((1, 1), lv)] * 2)
+            self.assertAlmostEqual(float(mu), 1.0, places=5)
+            self.assertAlmostEqual(float(logvar), lv - float(torch.log(torch.tensor(2.0))), places=4)
+
+    def test_matches_closed_form_in_float64(self):
+        torch.manual_seed(0)
+        mus = [torch.randn(5, 3, dtype=torch.float64) for _ in range(3)]
+        lvs = [torch.randn(5, 3, dtype=torch.float64) * 3 for _ in range(3)]
+        prec = [torch.exp(-lv) for lv in lvs]
+        var = 1.0 / sum(prec)
+        mu, logvar = product_of_experts(mus, lvs)
+        self.assertTrue(torch.allclose(mu, var * sum(p * m for p, m in zip(prec, mus))))
+        self.assertTrue(torch.allclose(logvar, torch.log(var)))
+
+    def test_gradients_flow_to_all_experts(self):
+        mus = [torch.randn(4, 2, requires_grad=True) for _ in range(2)]
+        lvs = [torch.zeros(4, 2, requires_grad=True) for _ in range(2)]
+        mu, logvar = product_of_experts(mus, lvs, weights=torch.full((4, 2), 0.5))
+        (mu.sum() + logvar.sum()).backward()
+        self.assertTrue(all(t.grad is not None and torch.isfinite(t.grad).all() for t in mus + lvs))
+
     def test_errors(self):
         with self.assertRaises(ValueError):
             product_of_experts([], [])
